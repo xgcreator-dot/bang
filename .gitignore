@@ -1,0 +1,17 @@
+# Local persistent data and runtime artifacts
+work/*.sqlite3
+work/*.db
+outputs/__pycache__/
+outputs/*.py[cod]
+outputs/*.log
+
+# Local secrets and environment overrides
+.env
+.env.*
+outputs/.env
+outputs/.env.*
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/

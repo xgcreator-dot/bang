@@ -64,7 +64,7 @@ if (location.pathname.endsWith('/collection.html')) {
   let current={tasks:[],sources:[],notices:{total:0,linked:0}};
   const reload=async()=>{
     current=await api('/api/tasks'); data.splice(0,data.length,...current.tasks.map(t=>[
-      t.name,t.source_name||'未绑定来源','RSS / Atom',t.enabled?'运行中':'已暂停',t.last_run||'尚未运行',String(t.added_count||'—'),t.id,t.last_status
+      t.name,t.source_name||'未绑定来源',t.connector_type==='json'?'JSON API':t.connector_type==='zhejiang_ggzy'?'浙江官方检索接口':t.connector_type==='hainan_ggzy'?'海南公开页面适配器':'RSS / Atom',t.enabled?'运行中':'已暂停',t.last_run||'尚未运行',String(t.added_count||'—'),t.id,t.last_status
     ])); render();
     const operator=document.querySelector('.top span');if(operator)operator.textContent='本机任务调度器 · 状态实时更新';
     const sourcesEl=document.querySelector('.right .panel');
@@ -83,8 +83,8 @@ if (location.pathname.endsWith('/collection.html')) {
   const refreshPlatforms=async()=>drawPlatforms(await api('/api/platforms'));
   const drawTasks=()=>{
     const tbody=document.getElementById('tasks'); if(!tbody)return;
-    tbody.innerHTML=current.tasks.map(t=>`<tr><td><b>${escapeHtml(t.name)}</b></td><td>${escapeHtml(t.source_name||'来源已删除')}</td><td>RSS / Atom</td><td><span class="badge ${t.enabled?'':'pause'}">${t.enabled?(t.last_status||'运行中'):'已暂停'}</span></td><td>${escapeHtml(t.last_run||'尚未运行')}</td><td>${t.added_count||'—'}</td><td><button class="action" data-run="${t.id}">运行</button> <button class="action" data-pause="${t.id}" data-enabled="${t.enabled?1:0}">${t.enabled?'暂停':'启用'}</button></td></tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:30px;color:#9aa6b4">还没有采集任务，请创建任务并绑定公开 RSS / Atom 来源。</td></tr>';
-    tbody.querySelectorAll('[data-run]').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='运行中…';try{const result=await api(`/api/tasks/${b.dataset.run}/run`,{method:'POST',body:'{}'});notifyApp(`采集完成：读取 ${result.read} 条，新增或更新 ${result.upserted} 条`)}catch(e){notifyApp('采集失败：'+e.message)}finally{await reload()}});
+    tbody.innerHTML=current.tasks.map(t=>`<tr><td><b>${escapeHtml(t.name)}</b></td><td>${escapeHtml(t.source_name||'来源已删除')}</td><td>${t.connector_type==='json'?'JSON API':t.connector_type==='zhejiang_ggzy'?'浙江官方检索接口':t.connector_type==='hainan_ggzy'?'海南公开页面适配器':'RSS / Atom'}</td><td><span class="badge ${t.enabled?'':'pause'}">${t.enabled?(t.last_status||'运行中'):'已暂停'}</span></td><td>${escapeHtml(t.last_run||'尚未运行')}</td><td>${t.added_count||'—'}</td><td><button class="action" data-run="${t.id}">运行</button> <button class="action" data-pause="${t.id}" data-enabled="${t.enabled?1:0}">${t.enabled?'暂停':'启用'}</button></td></tr>`).join('')||'<tr><td colspan="7" style="text-align:center;padding:30px;color:#9aa6b4">还没有采集任务，请创建任务并绑定公开 RSS / Atom 来源。</td></tr>';
+    tbody.querySelectorAll('[data-run]').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='运行中…';try{const result=await api(`/api/tasks/${b.dataset.run}/run`,{method:'POST',body:'{}'});const progress=result.cursor?.progress_label?`（${result.cursor.progress_label}）`:result.total>result.read?`（匹配 ${result.total} 条，分批回填中）`:'';notifyApp(`采集完成：读取 ${result.read} 条${progress}，新增或更新 ${result.upserted} 条`)}catch(e){notifyApp('采集失败：'+e.message)}finally{await reload()}});
     tbody.querySelectorAll('[data-pause]').forEach(b=>b.onclick=async()=>{try{await api(`/api/tasks/${b.dataset.pause}`,{method:'PATCH',body:JSON.stringify({enabled:b.dataset.enabled!=='1'})});await reload()}catch(e){notifyApp(e.message)}});
     const count=document.getElementById('taskCount');if(count)count.textContent=`SQLite 库内 ${current.notices.total} 条公告 · ${current.notices.linked} 条具备已校验原文链接；采集信息持续保存在本机数据库。`;
   };
@@ -99,10 +99,16 @@ if (location.pathname.endsWith('/collection.html')) {
     const feed=document.querySelector('#mb input[placeholder^="https://"]').value.trim();
     const category=document.querySelector('#mb select').value;
     const cadence=document.querySelectorAll('#mb select')[1]?.value||'手动运行';
-    if(!name||!feed){notifyApp('请填写任务名称和公开 RSS / Atom Feed URL');return}
+    if(!name||!feed){notifyApp('请填写任务名称和来源公开接口或 RSS / Atom 地址');return}
+    const connectorChoice=prompt('选择公开接入类型：输入 rss、json、zj（浙江）或 hn（海南）','rss');if(!connectorChoice)return;
+    const choice=connectorChoice.trim().toLowerCase();if(!['rss','json','zj','hn'].includes(choice)){notifyApp('仅支持 rss、json、zj 或 hn');return}const connector=choice==='zj'?'zhejiang_ggzy':choice==='hn'?'hainan_ggzy':choice;
+    let adapterConfig={};
+    if(connector==='json'){const raw=prompt('填写 JSON 字段映射配置，例如：{"items_path":"data.items","title_path":"title","link_path":"url","id_path":"id","published_path":"published_at","description_path":"description"}','{"items_path":"data.items","title_path":"title","link_path":"url","id_path":"id","published_path":"published_at","description_path":"description"}');if(!raw)return;try{adapterConfig=JSON.parse(raw)}catch{notifyApp('字段映射必须是有效 JSON');return}}
+    if(connector==='zhejiang_ggzy')adapterConfig={category_code:'002001001',page_size:16};
+    if(connector==='hainan_ggzy')adapterConfig={category_path:'jgzbgg',page_size:10};
     try{const sourceName=prompt('请填写这个公开来源的平台名称（需与平台库中的名称一致）',name+' 来源');if(!sourceName)return;
-      let platforms=await api('/api/platforms');let platform=platforms.find(p=>p.name===sourceName);if(!platform){await api('/api/platforms',{method:'POST',body:JSON.stringify({name:sourceName,homepage_url:new URL(feed).origin+'/',region:'待确认',categories:category,access_method:'RSS / Atom Feed',policy_note:'请核验来源公开规则与采集频率'})});platforms=await api('/api/platforms');platform=platforms.find(p=>p.name===sourceName);await refreshPlatforms()}
-      await api('/api/sources',{method:'POST',body:JSON.stringify({name:sourceName,feed_url:feed,category,platform_id:platform.id})});
+      let platforms=await api('/api/platforms');let platform=platforms.find(p=>p.name===sourceName);if(!platform){await api('/api/platforms',{method:'POST',body:JSON.stringify({name:sourceName,homepage_url:new URL(feed).origin+'/',region:'待确认',categories:category,access_method:connector==='zhejiang_ggzy'?'浙江官方公开检索接口':connector==='hainan_ggzy'?'海南官方公开页面':connector==='json'?'公开 JSON API':'RSS / Atom Feed',policy_note:'请核验来源公开规则与采集频率'})});platforms=await api('/api/platforms');platform=platforms.find(p=>p.name===sourceName);await refreshPlatforms()}
+      await api('/api/sources',{method:'POST',body:JSON.stringify({name:sourceName,feed_url:feed,category,platform_id:platform.id,connector_type:connector,adapter_config:adapterConfig})});
       const latest=await api('/api/tasks');const source=latest.sources.find(s=>s.name===sourceName);
       await api('/api/tasks',{method:'POST',body:JSON.stringify({name,source_id:source.id,cadence})});
       document.getElementById('mb').classList.remove('show');document.getElementById('taskName').value='';document.querySelector('#mb input[placeholder^="https://"]').value='';await reload();await refreshPlatforms();notifyApp('来源和采集任务已保存；完成平台核验后即可运行');

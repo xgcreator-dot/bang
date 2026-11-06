@@ -67,6 +67,7 @@ PROVINCIAL_PLATFORMS = [
 ADAPTER_BASED_PLATFORMS = {
     "浙江省公共资源交易服务平台": ("浙江省公共资源交易服务平台-工程建设招标公告", "https://ggzy.zj.gov.cn/", "ggzy.zj.gov.cn", "招标公告", "zhejiang_ggzy", {"category_code": "002001001", "page_size": 16}, "浙江省公共资源交易工程建设招标公告", "每 30 分钟"),
     "海南省公共资源交易平台": ("海南省公共资源交易平台-建设工程招标公告", "https://ggzy.hainan.gov.cn/ggzy/", "ggzy.hainan.gov.cn", "招标公告", "hainan_ggzy", {"category_path": "jgzbgg", "page_size": 10}, "海南省公共资源交易建设工程招标公告", "每 30 分钟"),
+    "江西省公共资源交易平台": ("江西省公共资源交易平台-交易公告", "https://www.jxsggzy.cn/", "www.jxsggzy.cn", "招标公告", "jiangxi_ggzy", {"page_size": 10}, "江西省公共资源交易公告", "每 30 分钟"),
 }
 
 
@@ -465,6 +466,93 @@ def fetch_hainan_ggzy(source):
     return items, len(items), cursor
 
 
+def fetch_jiangxi_ggzy(source):
+    host = source["allowed_host"].lower()
+    if host not in ("www.jxsggzy.cn", "ggzy.jiangxi.gov.cn"):
+        raise ValueError("江西连接器仅允许江西省公共资源交易平台官方域名")
+    try:
+        config = json.loads(source["adapter_config"] or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError("江西平台连接器配置不是有效 JSON") from exc
+    page_size = min(10, max(1, int(config.get("page_size", 10))))
+    end = datetime.now().astimezone()
+    window_start = source["sync_window_start"] or (end - timedelta(days=2)).strftime("%Y-%m-%d 00:00:00")
+    window_end = source["sync_window_end"] or end.strftime("%Y-%m-%d %H:%M:%S")
+    offset = int(source["next_offset"] or 0)
+    categories = ["002001001", "002002002", "002003001", "002004001", "002005001", "002006001",
+        "002007001", "002008001", "002009001", "002010001", "002011001", "002013001",
+        "002015001", "002016001", "002017001", "002021001", "002019001", "002018001",
+        "002020001", "002022002", "002023002", "002024002", "002025002", "002026002"]
+    category_types = {"002001":"房建及市政工程", "002002":"交通工程", "002003":"水利工程",
+        "002004":"重点工程", "002005":"外贷工程", "002006":"政府采购", "002007":"国土资源交易",
+        "002008":"产权交易", "002009":"林权交易", "002010":"医药采购", "002011":"环境能源交易",
+        "002013":"其他工程", "002015":"疫苗采购", "002016":"农田工程", "002017":"矿业权交易",
+        "002018":"林业工程", "002019":"自然资源工程", "002020":"铁路工程", "002021":"其他交易"}
+    items, total_count, records_seen = [], 0, 0
+    endpoint = f"https://{host}/XZinterface/rest/esinteligentsearch/getFullTextDataNew"
+    for page in range(3):
+        payload = {"token":"", "pn":offset+page*page_size, "rn":page_size, "sdt":"", "edt":"",
+            "wd":"", "inc_wd":"", "exc_wd":"", "fields":"", "cnum":"", "sort":'{"webdate":"0","id":"0"}',
+            "ssort":"title", "cl":1200, "terminal":"", "condition":[],
+            "time":[{"fieldName":"webdate", "startTime":window_start, "endTime":window_end}],
+            "highlights":"", "statistics":None,
+            "unionCondition":[{"fieldName":"categorynum", "equal":None, "notEqual":None,
+                "equalList":categories, "notEqualList":None}],
+            "accuracy":"", "noParticiple":"1", "searchRange":None, "noWd":True}
+        with FETCH_GUARD:
+            wait = 10 - (time.monotonic() - LAST_FETCH_BY_HOST.get(host, 0))
+            if wait > 0:
+                time.sleep(wait)
+            LAST_FETCH_BY_HOST[host] = time.monotonic()
+        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), method="POST",
+            headers={"User-Agent":"BidSuiteDemo/1.0 (public tender data connector)", "Accept":"application/json",
+                     "Content-Type":"application/json;charset=utf-8"})
+        opener = urllib.request.build_opener(SameHostRedirect(host))
+        with opener.open(req, timeout=20) as response:
+            if safe_host(response.geturl()) != host:
+                raise ValueError("江西平台接口跳转到未登记域名，已阻止")
+            raw = response.read(5_000_001)
+            if len(raw) > 5_000_000:
+                raise ValueError("江西平台接口响应超过 5 MB 限制")
+        try:
+            result = json.loads(raw.decode("utf-8-sig")).get("result") or {}
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("江西平台检索接口返回格式无效") from exc
+        records = result.get("records") or []
+        if not isinstance(records, list):
+            raise ValueError("江西平台返回的 records 不是数组")
+        records_seen += len(records)
+        total_count = int(result.get("totalcount") or 0)
+        for row in records:
+            title = str(row.get("titlenew") or row.get("title") or "").strip()
+            link_path = str(row.get("linkurl") or "").strip()
+            if not title or not link_path:
+                continue
+            link = urllib.parse.urljoin(f"https://{host}/", link_path)
+            if safe_host(link) != host:
+                continue
+            raw_description = html.unescape(str(row.get("content") or ""))
+            description = re.sub(r"<[^>]+>", " ", raw_description)
+            description = re.sub(r"\s+", " ", description).strip()
+            category_num = str(row.get("categorynum") or "")
+            category_type = next((label for prefix,label in category_types.items() if category_num.startswith(prefix)), "公共资源交易")
+            region = str(row.get("infod") or "")
+            items.append({"title":title, "source_url":link,
+                "source_notice_id":str(row.get("infoid") or row.get("id") or link),
+                "published_at":normalize_published_date(str(row.get("webdate") or row.get("infodate") or "")),
+                "description":description[:1200], "region":("江西省"+region) if region else "江西省",
+                "type":category_type, "kind":str(row.get("categoryname") or "交易公告")})
+        if not records or len(records) < page_size or offset+(page+1)*page_size >= total_count:
+            break
+    next_offset = offset + records_seen
+    complete = next_offset >= total_count or records_seen == 0
+    cursor = {"next_offset":0 if complete else next_offset,
+        "sync_window_start":"" if complete else window_start,
+        "sync_window_end":"" if complete else window_end,
+        "backfill_complete":complete}
+    return items, total_count, cursor
+
+
 def fetch_feed(source):
     payload, url, host = fetch_payload(source)
     root = ET.fromstring(payload)
@@ -515,6 +603,8 @@ def fetch_source(source):
         return fetch_zhejiang_ggzy(source)
     if connector == "hainan_ggzy":
         return fetch_hainan_ggzy(source)
+    if connector == "jiangxi_ggzy":
+        return fetch_jiangxi_ggzy(source)
     raise ValueError("该来源连接器类型暂不支持")
 
 
@@ -677,7 +767,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if not name or not url: return self.send_json({"error":"来源名称和 Feed URL 必填"},400)
                     host=safe_host(url)
                     connector=(data.get("connector_type") or "rss").strip().lower()
-                    if connector not in ("rss","json","zhejiang_ggzy","hainan_ggzy"): return self.send_json({"error":"连接器类型仅支持 RSS / Atom、公开 JSON API、浙江省或海南省官方公开平台适配器"},400)
+                    if connector not in ("rss","json","zhejiang_ggzy","hainan_ggzy","jiangxi_ggzy"): return self.send_json({"error":"连接器类型仅支持 RSS / Atom、公开 JSON API，以及浙江、海南、江西省官方公开平台适配器"},400)
                     config=data.get("adapter_config") or {}
                     if not isinstance(config,dict): return self.send_json({"error":"字段映射配置必须是对象"},400)
                     if connector=="json" and not config.get("title_path"):
@@ -686,6 +776,8 @@ class Handler(SimpleHTTPRequestHandler):
                         return self.send_json({"error":"浙江省适配器只能绑定 ggzy.zj.gov.cn"},400)
                     if connector=="hainan_ggzy" and host!="ggzy.hainan.gov.cn":
                         return self.send_json({"error":"海南省适配器只能绑定 ggzy.hainan.gov.cn"},400)
+                    if connector=="jiangxi_ggzy" and host not in ("www.jxsggzy.cn","ggzy.jiangxi.gov.cn"):
+                        return self.send_json({"error":"江西省适配器只能绑定江西省公共资源交易平台官方域名"},400)
                     db.execute("INSERT INTO sources(name,feed_url,allowed_host,category,platform_id,connector_type,adapter_config) VALUES(?,?,?,?,?,?,?)",(name,url,host,data.get("category","招标公告"),data.get("platform_id") or None,connector,json.dumps(config,ensure_ascii=False)))
                     db.execute("INSERT INTO audit(action,detail,created_at) VALUES(?,?,?)",("新增来源",name,now()))
                     return self.send_json({"ok":True})
